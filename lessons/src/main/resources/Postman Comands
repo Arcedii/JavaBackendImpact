@@ -1,0 +1,7 @@
+For create users url
+Type Row
+        {
+          "username": "testuser",
+          "password": "password123"
+        }
+
