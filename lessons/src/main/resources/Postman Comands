@@ -5,3 +5,40 @@ Type Row
           "password": "password123"
         }
 
+
+((Pasul 1) Înregistrare: Trimite o cerere POST la http://localhost:8081/api/users/register cu următorul conținut:
+ JSON
+ {
+     „firstName”: „testuser1”,
+     „password”: „password”
+ }
+ Ar trebui să primești un răspuns 200 OK „User registered successfully!”.
+
+ (Pasul 2) Autentificare: Trimite o cerere POST la http://localhost:8081/api/authenticate cu corpul:
+ JSON
+ {
+     „username”: „testuser1”,
+     „password”: „password”
+ }
+ Vei primi un token JWT ca răspuns. Copiază-l.
+
+ (Pasul 3) Obținerea listei de utilizatori (endpoint securizat):
+ Creează o nouă cerere GET la http://localhost:8081/api/users.
+ Accesează fila Authorization -> Bearer Token.
+ Intră tokenul copiat.
+ Apasă Send.
+ Rezultat: Ar trebui să primești un răspuns 200 OK și un JSON cu lista tuturor utilizatorilor înregistrați (fără parolele lor):
+ JSON
+ [
+     {
+         „id”: 1,
+         „username”: „testuser1”
+     },
+     {
+         „id”: 2,
+         „username”: „testuser2”
+     }
+ ]
+ {
+     „jwt”: "eyJhbGciOiJIUzI1NiJ9. eyJzdWIiOiJ0ZXN0dXNlcjEiLCJpYXQiOjE3NzU0NzA4OTMsImV4cCI6MTc3NTU1NzI5M30.5n591OMqn4pnnNnQXyg-jUmmERR3mFDm1icE9VMugN0"
+ }
