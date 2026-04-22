@@ -4,14 +4,13 @@ import com.impact.lessons.config.jwt.JwtUtil;
 import com.impact.lessons.dto.CreateUserRequest;
 import com.impact.lessons.dto.RefreshRequest;
 import com.impact.lessons.dto.UserDto;
-import com.impact.lessons.entity.RefreshToken;
-import com.impact.lessons.entity.Role;
-import com.impact.lessons.entity.User;
-import com.impact.lessons.entity.UserPersonalData;
+import com.impact.lessons.dto.UserPersonalDataDto;
+import com.impact.lessons.entity.*;
 import com.impact.lessons.model.AuthenticationResponse;
 import com.impact.lessons.repository.RoleRepository;
 import com.impact.lessons.repository.UserPersonalDataRepository;
 import com.impact.lessons.repository.UserRepository;
+import com.impact.lessons.repository.UserRoleRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.security.authentication.AuthenticationManager;
@@ -37,6 +36,9 @@ public class UserService implements UserDetailsService {
 
     @Autowired
     private RoleRepository roleRepository;
+
+    @Autowired
+    private UserRoleRepository userRoleRepository;
 
     @Autowired
     private PasswordEncoder passwordEncoder;
@@ -98,14 +100,37 @@ public class UserService implements UserDetailsService {
                 .collect(Collectors.toList());
     }
 
+    @Transactional
+    public UserPersonalData updatePersonalData(String username, UserPersonalDataDto personalDataDto) {
+        User user = userRepository.findByUsername(username);
+        if (user == null) {
+            throw new UsernameNotFoundException("User not found");
+        }
+
+        UserPersonalData personalData = userPersonalDataRepository.findById(user.getId())
+                .orElse(new UserPersonalData());
+
+        personalData.setUser(user);
+        personalData.setFirstName(personalDataDto.getFirstName());
+        personalData.setLastName(personalDataDto.getLastName());
+        personalData.setBirthDate(personalDataDto.getBirthDate());
+
+        return userPersonalDataRepository.save(personalData);
+    }
+
     public AuthenticationResponse loginUser(String username, String password) {
         authenticationManager.authenticate(new UsernamePasswordAuthenticationToken(username, password));
 
         User user = userRepository.findByUsername(username);
         UserPersonalData personalData = userPersonalDataRepository.findById(user.getId()).orElse(null);
 
-        String accessToken = jwtUtil.generateToken(user, personalData);
-        RefreshToken refreshToken = refreshTokenService.createRefreshToken(user.getId());
+        String role = user.getRoles().stream()
+                .map(Role::getName)
+                .findFirst()
+                .orElse(null);
+
+        String accessToken = jwtUtil.generateToken(user, personalData, role);
+        RefreshToken refreshToken = refreshTokenService.createOrUpdateRefreshToken(user.getId());
 
         return new AuthenticationResponse(accessToken, refreshToken.getToken());
     }
@@ -116,7 +141,11 @@ public class UserService implements UserDetailsService {
                 .map(RefreshToken::getUser)
                 .map(user -> {
                     UserPersonalData personalData = userPersonalDataRepository.findById(user.getId()).orElse(null);
-                    String accessToken = jwtUtil.generateToken(user, personalData);
+                    String role = user.getRoles().stream()
+                            .map(Role::getName)
+                            .findFirst()
+                            .orElse(null);
+                    String accessToken = jwtUtil.generateToken(user, personalData, role);
                     return new AuthenticationResponse(accessToken, refreshRequest.getRefreshToken());
                 })
                 .orElseThrow(() -> new RuntimeException("Refresh token is not in database!"));

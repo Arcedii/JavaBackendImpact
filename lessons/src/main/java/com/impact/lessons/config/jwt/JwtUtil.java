@@ -8,7 +8,6 @@ import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.SignatureAlgorithm;
 import io.jsonwebtoken.security.Keys;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.stereotype.Component;
 
@@ -18,7 +17,6 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.function.Function;
-import java.util.stream.Collectors;
 
 @Component
 public class JwtUtil {
@@ -67,14 +65,16 @@ public class JwtUtil {
         return createToken(claims, userDetails.getUsername());
     }
 
-    public String generateToken(User user, UserPersonalData personalData) {
+    public String generateToken(User user, UserPersonalData personalData, String role) {
         Map<String, Object> claims = new HashMap<>();
         claims.put("userId", user.getId());
-        claims.put("role", user.getRoles().stream().map(role -> role.getName()).collect(Collectors.toList()));
+        claims.put("role", role);
         if (personalData != null) {
             claims.put("firstName", personalData.getFirstName());
             claims.put("lastName", personalData.getLastName());
-            claims.put("birthDate", personalData.getBirthDate().toString());
+            if (personalData.getBirthDate() != null) {
+                claims.put("birthDate", personalData.getBirthDate().toString());
+            }
         }
         return createToken(claims, user.getUsername());
     }
