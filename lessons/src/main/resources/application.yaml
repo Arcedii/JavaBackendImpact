@@ -22,3 +22,5 @@ spring:
 jwt:
   secret: "a3d9c8a8f6e2b1e4a9d7c8b3a0f9e8d5c4b1a3f9e8d5c4b1a3f9e8d5c4b1a3f9e8d5c4b1a3f9e8d5c4b1a3f9e8d5c4b1" # Secret puternic și lung pentru semnarea token-urilor JWT.
   expiration: 86400000 # Timpul de expirare al token-ului în milisecunde (24 de ore).
+  refresh:
+    expiration: 604800000 # 7 days

@@ -1,12 +1,21 @@
 package com.impact.lessons.services;
 
+import com.impact.lessons.config.jwt.JwtUtil;
 import com.impact.lessons.dto.CreateUserRequest;
+import com.impact.lessons.dto.RefreshRequest;
 import com.impact.lessons.dto.UserDto;
+import com.impact.lessons.entity.RefreshToken;
 import com.impact.lessons.entity.Role;
 import com.impact.lessons.entity.User;
+import com.impact.lessons.entity.UserPersonalData;
+import com.impact.lessons.model.AuthenticationResponse;
 import com.impact.lessons.repository.RoleRepository;
+import com.impact.lessons.repository.UserPersonalDataRepository;
 import com.impact.lessons.repository.UserRepository;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.userdetails.UserDetails;
@@ -31,6 +40,19 @@ public class UserService implements UserDetailsService {
 
     @Autowired
     private PasswordEncoder passwordEncoder;
+
+    @Autowired
+    private RefreshTokenService refreshTokenService;
+
+    @Autowired
+    private JwtUtil jwtUtil;
+
+    @Autowired
+    private UserPersonalDataRepository userPersonalDataRepository;
+
+    @Lazy
+    @Autowired
+    private AuthenticationManager authenticationManager;
 
     @Override
     @Transactional(readOnly = true)
@@ -74,5 +96,29 @@ public class UserService implements UserDetailsService {
         return userRepository.findAll().stream()
                 .map(user -> new UserDto(user.getId(), user.getUsername()))
                 .collect(Collectors.toList());
+    }
+
+    public AuthenticationResponse loginUser(String username, String password) {
+        authenticationManager.authenticate(new UsernamePasswordAuthenticationToken(username, password));
+
+        User user = userRepository.findByUsername(username);
+        UserPersonalData personalData = userPersonalDataRepository.findById(user.getId()).orElse(null);
+
+        String accessToken = jwtUtil.generateToken(user, personalData);
+        RefreshToken refreshToken = refreshTokenService.createRefreshToken(user.getId());
+
+        return new AuthenticationResponse(accessToken, refreshToken.getToken());
+    }
+
+    public AuthenticationResponse refreshToken(RefreshRequest refreshRequest) {
+        return refreshTokenService.findByToken(refreshRequest.getRefreshToken())
+                .map(refreshTokenService::verifyExpiration)
+                .map(RefreshToken::getUser)
+                .map(user -> {
+                    UserPersonalData personalData = userPersonalDataRepository.findById(user.getId()).orElse(null);
+                    String accessToken = jwtUtil.generateToken(user, personalData);
+                    return new AuthenticationResponse(accessToken, refreshRequest.getRefreshToken());
+                })
+                .orElseThrow(() -> new RuntimeException("Refresh token is not in database!"));
     }
 }

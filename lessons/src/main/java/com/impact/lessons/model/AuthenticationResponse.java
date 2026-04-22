@@ -7,5 +7,10 @@ import lombok.Data;
 @AllArgsConstructor
 public class AuthenticationResponse {
 
-    private final String jwt; // Token-ul JWT generat.
+    private String accessToken;
+    private String refreshToken;
+
+    public AuthenticationResponse(String accessToken) {
+        this.accessToken = accessToken;
+    }
 }
