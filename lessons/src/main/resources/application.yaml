@@ -6,14 +6,14 @@ spring:
     name: lessons
 
   datasource:
-    url: jdbc:postgresql://localhost:5432/TestBackend
+    url: jdbc:postgresql://localhost:5432/TestTest
     username: postgres
     password: 1234567890
 
   jpa:
     show-sql: true
     hibernate:
-      ddl-auto: create
+      ddl-auto: update
 
   sql:
     init:

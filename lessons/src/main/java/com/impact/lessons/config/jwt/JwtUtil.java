@@ -35,6 +35,14 @@ public class JwtUtil {
         return extractClaim(token, Claims::getSubject);
     }
 
+    public String extractRole(String token) {
+        String role = extractClaim(token, claims -> claims.get("role", String.class));
+        if (role == null || role.isBlank()) {
+            return null;
+        }
+        return role.startsWith("ROLE_") ? role : "ROLE_" + role;
+    }
+
     public Date extractExpiration(String token) {
         return extractClaim(token, Claims::getExpiration);
     }
@@ -68,7 +76,7 @@ public class JwtUtil {
     public String generateToken(User user, UserPersonalData personalData, String role) {
         Map<String, Object> claims = new HashMap<>();
         claims.put("userId", user.getId());
-        claims.put("role", role);
+        claims.put("role", normalizeRole(role));
         if (personalData != null) {
             claims.put("firstName", personalData.getFirstName());
             claims.put("lastName", personalData.getLastName());
@@ -87,6 +95,13 @@ public class JwtUtil {
                 .setExpiration(new Date(System.currentTimeMillis() + expiration))
                 .signWith(getSigningKey(), SignatureAlgorithm.HS256)
                 .compact();
+    }
+
+    private String normalizeRole(String role) {
+        if (role == null || role.isBlank()) {
+            return null;
+        }
+        return role.startsWith("ROLE_") ? role : "ROLE_" + role;
     }
 
     public Boolean validateToken(String token, UserDetails userDetails) {

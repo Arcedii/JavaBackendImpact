@@ -1,16 +1,18 @@
 package com.impact.lessons.services;
 
 import com.impact.lessons.config.jwt.JwtUtil;
+import com.impact.lessons.dto.AssignRoleRequest;
 import com.impact.lessons.dto.CreateUserRequest;
 import com.impact.lessons.dto.RefreshRequest;
 import com.impact.lessons.dto.UserDto;
 import com.impact.lessons.dto.UserPersonalDataDto;
 import com.impact.lessons.entity.*;
+import com.impact.lessons.exception.ApiException;
+import com.impact.lessons.exception.ErrorCode;
 import com.impact.lessons.model.AuthenticationResponse;
 import com.impact.lessons.repository.RoleRepository;
 import com.impact.lessons.repository.UserPersonalDataRepository;
 import com.impact.lessons.repository.UserRepository;
-import com.impact.lessons.repository.UserRoleRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.security.authentication.AuthenticationManager;
@@ -26,6 +28,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 @Service
@@ -36,9 +40,6 @@ public class UserService implements UserDetailsService {
 
     @Autowired
     private RoleRepository roleRepository;
-
-    @Autowired
-    private UserRoleRepository userRoleRepository;
 
     @Autowired
     private PasswordEncoder passwordEncoder;
@@ -65,7 +66,7 @@ public class UserService implements UserDetailsService {
         }
 
         List<GrantedAuthority> authorities = user.getRoles().stream()
-                .map(role -> new SimpleGrantedAuthority(role.getName()))
+                .map(role -> new SimpleGrantedAuthority(normalizeRole(role.getName())))
                 .collect(Collectors.toList());
 
         return new org.springframework.security.core.userdetails.User(user.getUsername(), user.getPassword(), authorities);
@@ -74,7 +75,7 @@ public class UserService implements UserDetailsService {
     @Transactional
     public void createUser(CreateUserRequest request) {
         if (userRepository.findByUsername(request.getUsername()) != null) {
-            throw new RuntimeException("Error: Username is already taken!");
+            throw new ApiException(ErrorCode.AUTH_FAILED, "Username is already taken");
         }
 
         User newUser = new User();
@@ -104,10 +105,10 @@ public class UserService implements UserDetailsService {
     public UserPersonalData updatePersonalData(String username, UserPersonalDataDto personalDataDto) {
         User user = userRepository.findByUsername(username);
         if (user == null) {
-            throw new UsernameNotFoundException("User not found");
+            throw new ApiException(ErrorCode.USER_NOT_FOUND, "User not found");
         }
 
-        UserPersonalData personalData = userPersonalDataRepository.findById(user.getId())
+        UserPersonalData personalData = userPersonalDataRepository.findById(Objects.requireNonNull(user.getId()))
                 .orElse(new UserPersonalData());
 
         personalData.setUser(user);
@@ -122,7 +123,7 @@ public class UserService implements UserDetailsService {
         authenticationManager.authenticate(new UsernamePasswordAuthenticationToken(username, password));
 
         User user = userRepository.findByUsername(username);
-        UserPersonalData personalData = userPersonalDataRepository.findById(user.getId()).orElse(null);
+        UserPersonalData personalData = userPersonalDataRepository.findById(Objects.requireNonNull(user.getId())).orElse(null);
 
         String role = user.getRoles().stream()
                 .map(Role::getName)
@@ -140,7 +141,7 @@ public class UserService implements UserDetailsService {
                 .map(refreshTokenService::verifyExpiration)
                 .map(RefreshToken::getUser)
                 .map(user -> {
-                    UserPersonalData personalData = userPersonalDataRepository.findById(user.getId()).orElse(null);
+                    UserPersonalData personalData = userPersonalDataRepository.findById(Objects.requireNonNull(user.getId())).orElse(null);
                     String role = user.getRoles().stream()
                             .map(Role::getName)
                             .findFirst()
@@ -148,6 +149,34 @@ public class UserService implements UserDetailsService {
                     String accessToken = jwtUtil.generateToken(user, personalData, role);
                     return new AuthenticationResponse(accessToken, refreshRequest.getRefreshToken());
                 })
-                .orElseThrow(() -> new RuntimeException("Refresh token is not in database!"));
+                .orElseThrow(() -> new ApiException(ErrorCode.AUTH_FAILED, "Refresh token is not in database"));
+    }
+
+    @Transactional
+    public void assignRoleToUser(Long userId, AssignRoleRequest request) {
+        User user = userRepository.findById(Objects.requireNonNull(userId))
+                .orElseThrow(() -> new ApiException(ErrorCode.USER_NOT_FOUND, "User not found"));
+
+        String normalizedRole = normalizeRole(request.getRole());
+        if (!"ROLE_USER".equals(normalizedRole) && !"ROLE_ADMIN".equals(normalizedRole)) {
+            throw new ApiException(ErrorCode.AUTH_FAILED, "Role must be USER or ADMIN");
+        }
+
+        Role role = roleRepository.findByName(normalizedRole)
+                .orElseGet(() -> {
+                    Role newRole = new Role();
+                    newRole.setName(normalizedRole);
+                    return roleRepository.save(newRole);
+                });
+
+        user.setRoles(Set.of(role));
+        userRepository.save(user);
+    }
+
+    private String normalizeRole(String role) {
+        if (role == null || role.isBlank()) {
+            return "ROLE_USER";
+        }
+        return role.startsWith("ROLE_") ? role : "ROLE_" + role;
     }
 }

@@ -33,17 +33,17 @@ public class RefreshTokenService {
     public RefreshToken createOrUpdateRefreshToken(Long userId) {
         User user = userRepository.findById(userId).orElseThrow(() -> new RuntimeException("User not found"));
 
-        // Ищем существующий токен для этого пользователя
+
         Optional<RefreshToken> existingToken = refreshTokenRepository.findByUser(user);
 
         RefreshToken refreshToken;
         if (existingToken.isPresent()) {
-            // Если токен есть, обновляем его
+
             refreshToken = existingToken.get();
             refreshToken.setExpiryDate(Instant.now().plusMillis(refreshTokenDurationMs));
             refreshToken.setToken(UUID.randomUUID().toString());
         } else {
-            // Если токена нет, создаем новый
+
             refreshToken = new RefreshToken();
             refreshToken.setUser(user);
             refreshToken.setExpiryDate(Instant.now().plusMillis(refreshTokenDurationMs));
