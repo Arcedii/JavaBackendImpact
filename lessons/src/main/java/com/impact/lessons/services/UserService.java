@@ -1,6 +1,8 @@
 package com.impact.lessons.services;
 
 import com.impact.lessons.config.jwt.JwtUtil;
+import com.impact.lessons.cache.ImpactCacheEvict;
+import com.impact.lessons.cache.ImpactCacheable;
 import com.impact.lessons.dto.AssignRoleRequest;
 import com.impact.lessons.dto.CreateUserRequest;
 import com.impact.lessons.dto.RefreshRequest;
@@ -73,6 +75,7 @@ public class UserService implements UserDetailsService {
     }
 
     @Transactional
+    @ImpactCacheEvict(prefix = "users:list", allEntries = true)
     public void createUser(CreateUserRequest request) {
         if (userRepository.findByUsername(request.getUsername()) != null) {
             throw new ApiException(ErrorCode.AUTH_FAILED, "Username is already taken");
@@ -95,6 +98,7 @@ public class UserService implements UserDetailsService {
         userRepository.save(newUser);
     }
 
+    @ImpactCacheable(prefix = "users:list", ttlSeconds = 300)
     public List<UserDto> getAllUsers() {
         return userRepository.findAll().stream()
                 .map(user -> new UserDto(user.getId(), user.getUsername()))
@@ -102,6 +106,7 @@ public class UserService implements UserDetailsService {
     }
 
     @Transactional
+    @ImpactCacheEvict(prefix = "users:list", allEntries = true)
     public UserPersonalData updatePersonalData(String username, UserPersonalDataDto personalDataDto) {
         User user = userRepository.findByUsername(username);
         if (user == null) {
@@ -153,6 +158,7 @@ public class UserService implements UserDetailsService {
     }
 
     @Transactional
+    @ImpactCacheEvict(prefix = "users:list", allEntries = true)
     public void assignRoleToUser(Long userId, AssignRoleRequest request) {
         User user = userRepository.findById(Objects.requireNonNull(userId))
                 .orElseThrow(() -> new ApiException(ErrorCode.USER_NOT_FOUND, "User not found"));
