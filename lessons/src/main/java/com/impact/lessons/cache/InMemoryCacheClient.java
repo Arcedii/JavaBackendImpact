@@ -21,6 +21,7 @@ public class InMemoryCacheClient implements CacheClient {
         }
     }
 
+    // ConcurrentHashMap: acces sigur din mai multe thread-uri (request-uri) simultan.
     private final Map<String, Entry> store = new ConcurrentHashMap<>();
 
     @Override
@@ -28,6 +29,7 @@ public class InMemoryCacheClient implements CacheClient {
         Entry entry = store.get(key);
         if (entry == null) return Optional.empty();
         if (entry.expiresAtMillis > 0 && System.currentTimeMillis() >= entry.expiresAtMillis) {
+            // Expirat -> curățăm la citire ca să nu ținem date moarte în memorie.
             store.remove(key);
             return Optional.empty();
         }
@@ -50,6 +52,7 @@ public class InMemoryCacheClient implements CacheClient {
 
     @Override
     public void deleteByPrefix(String prefix) {
+        // Implementare simplă: iterăm cheile și ștergem cele care au prefix-ul.
         for (String key : store.keySet()) {
             if (key.startsWith(prefix)) {
                 store.remove(key);

@@ -26,6 +26,7 @@ public class JacksonCacheMarshaller implements CacheMarshaller {
     @Override
     public <T> T deserialize(byte[] data, Type type) {
         try {
+            // Type (nu doar Class) ca să funcționeze corect pentru tipuri generice (ex. List<UserDto>).
             JavaType javaType = objectMapper.getTypeFactory().constructType(type);
             return objectMapper.readValue(data, javaType);
         } catch (Exception e) {

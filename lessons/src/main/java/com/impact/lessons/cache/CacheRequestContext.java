@@ -26,6 +26,7 @@ public final class CacheRequestContext {
     }
 
     public static void clear() {
+        // Curățăm mereu la final de request ca să evităm "leak" între request-uri pe același thread.
         STATUS.remove();
     }
 }

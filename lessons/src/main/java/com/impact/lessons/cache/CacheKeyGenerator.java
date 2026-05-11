@@ -15,6 +15,7 @@ public interface CacheKeyGenerator {
         @Override
         public String generate(String prefix, Object[] args) {
             if (args == null || args.length == 0) {
+                // Cheie stabilă pentru metode fără argumente.
                 return prefix + ":static";
             }
             StringBuilder sb = new StringBuilder(prefix);
@@ -25,6 +26,7 @@ public interface CacheKeyGenerator {
             if (key.length() <= 256) {
                 return key;
             }
+            // Protecție: chei foarte lungi pot fi problematice; păstrăm prefix-ul și hash-uim restul.
             return prefix + ":sha256:" + sha256Hex(key);
         }
 

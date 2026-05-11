@@ -3,7 +3,7 @@ server:
 
 impact:
   cache:
-    type: memory # memory (default) | redis
+    type: memory # memory (default)
 
 spring:
   application:
@@ -13,11 +13,6 @@ spring:
     url: jdbc:postgresql://localhost:5432/TestTest
     username: postgres
     password: 1234567890
-
-  data:
-    redis:
-      host: localhost
-      port: 6379
 
   jpa:
     show-sql: true

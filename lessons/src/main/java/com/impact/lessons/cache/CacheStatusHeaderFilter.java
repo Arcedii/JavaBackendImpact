@@ -23,6 +23,7 @@ public class CacheStatusHeaderFilter extends OncePerRequestFilter {
         try {
             filterChain.doFilter(request, response);
         } finally {
+            // Punem header-ul după executarea request-ului (aspectul a setat HIT/MISS în ThreadLocal).
             CacheRequestContext.Status status = CacheRequestContext.getStatus();
             if (status != null) {
                 response.setHeader(HEADER_NAME, status.name());

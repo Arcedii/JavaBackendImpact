@@ -34,6 +34,7 @@ public class ImpactCacheAspect {
 
         Class<?> returnType = ((MethodSignature) pjp.getSignature()).getReturnType();
         if (returnType == Void.TYPE) {
+            // "void" nu are rezultat care să merite cache-uit.
             return pjp.proceed();
         }
 
@@ -43,6 +44,7 @@ public class ImpactCacheAspect {
             CacheRequestContext.markHit();
             log.debug("cache HIT key={}", key);
             Type genericReturnType = method.getGenericReturnType();
+            // Folosim genericReturnType ca să deserializăm corect tipuri gen List<UserDto>.
             return marshaller.deserialize(cached.get(), genericReturnType);
         }
 
@@ -50,6 +52,7 @@ public class ImpactCacheAspect {
         log.debug("cache MISS key={}", key);
         Object result = pjp.proceed();
         if (result != null) {
+            // Nu cache-uim null ca să evităm "negative caching" neintenționat.
             cacheClient.set(key, marshaller.serialize(result), Duration.ofSeconds(ann.ttlSeconds()));
             log.debug("cache PUT key={} ttlSeconds={}", key, ann.ttlSeconds());
         }
@@ -64,6 +67,7 @@ public class ImpactCacheAspect {
         Object result = pjp.proceed();
 
         if (ann.allEntries()) {
+            // Ștergere "în masă" pe prefix: ex. users:list:*.
             cacheClient.deleteByPrefix(ann.prefix() + ":");
             log.debug("cache EVICT prefix={}*", ann.prefix());
         } else {
