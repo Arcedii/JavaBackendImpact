@@ -1,13 +1,24 @@
 server:
   port: 8081
 
+# Loguri cache: INFO = backend la pornire + aspect wired; DEBUG = HIT/MISS/PUT/EVICT per request
+logging:
+  level:
+    com.impact.lessons.cache: DEBUG
+
 impact:
   cache:
-    type: memory # memory (default)
+    # memory = JVM (fără Redis) | redis = Memurai/Redis (spring.data.redis)
+    type: redis
 
 spring:
   application:
     name: lessons
+
+  data:
+    redis:
+      host: localhost
+      port: 6379
 
   datasource:
     url: jdbc:postgresql://localhost:5432/TestTest

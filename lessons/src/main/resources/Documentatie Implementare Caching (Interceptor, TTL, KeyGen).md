@@ -1,495 +1,319 @@
-# Documentație tehnică: Caching (Interceptor/Decorator), TTL, Key Generator, Marshalling
+# Documentație: implementarea caching-ului în proiectul „lessons”
 
-## Scop
-
-În acest урок am introdus **un mecanism de caching** care poate accelera endpoint-urile “read-heavy” (de exemplu listări), fără să “murdărim” business-logic cu `if (cache...)`.
-
-Mai important: caching-ul este aplicat **automat**, în jurul metodelor, folosind **AOP (Aspect Oriented Programming)**. Asta înseamnă că:
-
-- în `UserService` (sau alte servicii) scrii normal codul de business
-- iar caching-ul se execută “înainte/după” metoda reală, într-un “interceptor” (aspect)
-
-Concret, în proiect există următoarele piese:
-
-- **Marshalling** (serializare/deserializare)
-- **Interceptor / Decorator** (AOP) care aplică caching automat
-- **TTL (Time-To-Live)** pentru expirarea datelor
-- **Key Generator** pentru chei unice și stabile
-
-În plus, am adăugat un semnal vizibil în Postman:
-
-- header de răspuns: `**X-Impact-Cache: HIT`** sau `**X-Impact-Cache: MISS**`
+Acest document descrie **ce am introdus în cod**, **cum funcționează** și **cum se testează**, pe înțelesul unei persoane care știe Java/Spring la nivel de laborator.
 
 ---
 
-## 1) Configurare rapidă (simplă)
+## 1. Ce problemă rezolvăm
 
-### 1.1 Mod implicit: `memory` (fără Redis, fără Docker)
+Endpoint-urile care **citesc mult** din baza de date (ex.: listă de utilizatori) pot fi lente dacă rulează aceeași interogare la fiecare request.
 
-În `application.yaml` există setarea:
+**Caching-ul** păstrează rezultatul unei metode într-un depozit rapid (memorie sau Redis), astfel încât următoarele apeluri cu aceiași parametri pot returna răspunsul **fără** să mai lovească baza de date.
 
-- `impact.cache.type: memory`
-
-Acest mod folosește un cache in-memory (în aplicație). Este cel mai simplu pentru laborator/lecție:
-
-- nu depinde de Redis
-- arată clar principiile (TTL + chei + interceptor)
+**Cerință de design:** nu vrem să umplem serviciile cu `if (există în cache) { ... }`. De aceea caching-ul este aplicat **în jurul** metodei, prin **AOP** (un aspect care interceptează apelul).
 
 ---
 
-## 2) Cum funcționează caching-ul “pe românește”, pas cu pas
+## 2. Ce am implementat (rezumat)
 
-Imaginează-ți un endpoint care apelează `UserService.getAllUsers()`. Fără caching, de fiecare dată:
 
-1. intră requestul
-2. se apelează metoda
-3. se citește din DB
-4. se construiesc DTO-urile
-5. se returnează răspunsul
+| Piesă                                            | Rol                                                                                     |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------- |
+| `**@ImpactCacheable`**                           | Marchează o metodă a cărei **valoare returnată** se poate citi din cache (GET logic).   |
+| `**@ImpactCacheEvict`**                          | După o metodă care **modifică date**, golește intrările din cache (consistență).        |
+| `**ImpactCacheAspect`**                          | Aspect AOP: calculează cheia, citește/scrie cache, marchează HIT/MISS, execută evict.   |
+| `**CacheClient**` + implementări                 | Abstracție peste stocare: `**InMemoryCacheClient**` sau `**RedisCacheClient**`.         |
+| `**CacheMarshaller` / `JacksonCacheMarshaller**` | Transformă obiecte ↔ `byte[]` (Jackson).                                                |
+| `**CacheKeyGenerator**`                          | Construiește chei stabile din `prefix` + argumente metodei.                             |
+| `**CacheRequestContext**`                        | Ține pe thread starea **HIT/MISS** și numele backend-ului (pentru header-e).            |
+| `**CacheResponseHeadersAdvice`**                 | Pune în răspuns header-ele **înainte** de serializarea JSON (important pentru Postman). |
+| `**CacheStatusHeaderFilter`**                    | La final de request **curăță** `ThreadLocal`-ul (fără scurgeri între request-uri).      |
+| **Config `impact.cache.type`**                   | Comută între `**memory**` și `**redis**` (Memurai/Redis pe `localhost:6379`).           |
+| **Loguri (`slf4j`)**                             | La pornire: ce backend e activ; la DEBUG: HIT/MISS/PUT/EVICT cu numele backend-ului.    |
 
-Cu caching-ul nostru, “în fața” metodei stă `ImpactCacheAspect`, care face asta:
 
-1. **Calculează cheia** (key) pentru metoda apelată
-2. **Caută în cache**: există deja date pentru cheia aia?
-   - dacă da → returnează datele din cache (HIT), fără DB
-   - dacă nu → execută metoda reală (MISS), apoi pune rezultatul în cache cu TTL
-
-Cheia idee: caching-ul e implementat “în jurul metodei”, nu în interiorul ei.
+**Nu folosim** adnotările standard Spring `@Cacheable` / `@CacheEvict` din modulul Spring Cache; avem **mecanism propriu**, dar ideile sunt aceleași.
 
 ---
 
-## 3) Blocurile conceptuale implementate în cod (cu exemple de cod)
+## 3. Dependențe și configurare
 
-### 2.1 Marshalling (Serializare / Deserializare)
+### 3.1. Maven (`pom.xml`)
 
-**De ce există:** cache-ul stochează `byte[]`/string, dar aplicația lucrează cu obiecte (DTO, liste).
+- `**spring-boot-starter-aop`** — pentru `@Aspect` și `@Around`.
+- `**spring-boot-starter-data-redis**` — pentru conexiune Redis când `impact.cache.type: redis`.
 
-În proiect:
+### 3.2. `application.yaml`
 
-- `CacheMarshaller` definește contractul:
-  - `serialize(Object) -> byte[]`
-  - `deserialize(byte[], Type) -> T`
-- `JacksonCacheMarshaller` implementează contractul folosind `ObjectMapper`.
+- `**impact.cache.type**`
+  - `**memory**` — totul rămâne în JVM (`ConcurrentHashMap`), nu ai nevoie de Redis.
+  - `**redis**` — datele merg în **Memurai/Redis**; trebuie server pornit pe `spring.data.redis.host` / `port` (implicit `localhost:6379`).
 
-Detaliu important:
+Spring creează **un singur** bean `CacheClient` activ (condiționat de proprietate).
 
-- Deserializarea folosește `**Type`** (nu doar `Class`) ca să funcționeze corect cu tipuri generice precum `List<UserDto>`.
+### 3.3. Teste automate (`src/test/resources/application.properties`)
 
-Cod relevant (`JacksonCacheMarshaller`):
-
-```java
-@Component
-public class JacksonCacheMarshaller implements CacheMarshaller {
-    private final ObjectMapper objectMapper;
-
-    public JacksonCacheMarshaller(ObjectMapper objectMapper) {
-        this.objectMapper = objectMapper;
-    }
-
-    @Override
-    public byte[] serialize(Object value) {
-        try {
-            return objectMapper.writeValueAsBytes(value);
-        } catch (Exception e) {
-            throw new IllegalStateException("Failed to serialize cache value", e);
-        }
-    }
-
-    @Override
-    public <T> T deserialize(byte[] data, Type type) {
-        try {
-            JavaType javaType = objectMapper.getTypeFactory().constructType(type);
-            return objectMapper.readValue(data, javaType);
-        } catch (Exception e) {
-            throw new IllegalStateException("Failed to deserialize cache value", e);
-        }
-    }
-}
-```
-
-### 2.2 Key Generator
-
-**De ce există:** cache-ul are nevoie de chei unice și predictibile, bazate pe parametrii metodei.
-
-În proiect:
-
-- `CacheKeyGenerator` generează chei în forma:
-  - `prefix:arg1:arg2:...`
-  - dacă cheia ar deveni prea lungă → folosește fallback `sha256`.
-
-Ce face exact:
-
-- dacă metoda **nu are argumente** → cheia devine `prefix:static`
-- dacă are argumente → fiecare argument e normalizat:
-  - `null` → `"null"`
-  - se elimină spațiile multiple (`"a   b"` devine `"a b"`)
-  - se taie la max 80 caractere (ca să nu explodeze cheia)
-- dacă cheia finală depășește 256 caractere → se folosește `sha256`
-
-Cod relevant (`CacheKeyGenerator`):
-
-```java
-public interface CacheKeyGenerator {
-    String generate(String prefix, Object[] args);
-
-    static CacheKeyGenerator defaultGenerator() {
-        return new DefaultCacheKeyGenerator();
-    }
-
-    final class DefaultCacheKeyGenerator implements CacheKeyGenerator {
-        @Override
-        public String generate(String prefix, Object[] args) {
-            if (args == null || args.length == 0) {
-                return prefix + ":static";
-            }
-            StringBuilder sb = new StringBuilder(prefix);
-            for (Object arg : args) {
-                sb.append(':').append(normalize(arg));
-            }
-            String key = sb.toString();
-            if (key.length() <= 256) {
-                return key;
-            }
-            return prefix + ":sha256:" + sha256Hex(key);
-        }
-
-        private static String normalize(Object arg) {
-            if (arg == null) return "null";
-            String s = String.valueOf(arg);
-            s = s.replaceAll("\\s+", " ").trim();
-            return s.length() > 80 ? s.substring(0, 80) : s;
-        }
-
-        private static String sha256Hex(String input) {
-            try {
-                MessageDigest digest = MessageDigest.getInstance("SHA-256");
-                byte[] hashed = digest.digest(input.getBytes(StandardCharsets.UTF_8));
-                return HexFormat.of().formatHex(hashed);
-            } catch (Exception e) {
-                return Integer.toHexString(input.hashCode());
-            }
-        }
-    }
-}
-```
-
-Exemple conceptuale:
-
-- `users:list:static`
-- `user_profile:45`
-- `products_list:category=shoes:page=2:size=20`
-
-### 2.3 TTL (Time-To-Live)
-
-**De ce există:** să nu livrăm date vechi. Cache-ul trebuie să expire automat.
-
-În proiect:
-
-- `@ImpactCacheable(ttlSeconds = 300)` setează TTL per metodă (ex: 5 minute).
-- În `InMemoryCacheClient` TTL se verifică la `get`.
-
-Cum e implementat în `InMemoryCacheClient`:
-
-- la `set(key, value, ttl)` se calculează `expiresAtMillis = now + ttl`
-- la `get(key)`:
-  - dacă a expirat → intrarea se șterge și se consideră MISS
-  - dacă nu a expirat → se returnează valoarea
-
-Cod relevant (`InMemoryCacheClient`):
-
-```java
-@Component
-@ConditionalOnProperty(name = "impact.cache.type", havingValue = "memory", matchIfMissing = true)
-public class InMemoryCacheClient implements CacheClient {
-    private static final class Entry {
-        final byte[] value;
-        final long expiresAtMillis;
-
-        Entry(byte[] value, long expiresAtMillis) {
-            this.value = value;
-            this.expiresAtMillis = expiresAtMillis;
-        }
-    }
-
-    private final Map<String, Entry> store = new ConcurrentHashMap<>();
-
-    @Override
-    public Optional<byte[]> get(String key) {
-        Entry entry = store.get(key);
-        if (entry == null) return Optional.empty();
-        if (entry.expiresAtMillis > 0 && System.currentTimeMillis() >= entry.expiresAtMillis) {
-            store.remove(key);
-            return Optional.empty();
-        }
-        return Optional.of(entry.value);
-    }
-
-    @Override
-    public void set(String key, byte[] value, Duration ttl) {
-        long expiresAt = 0;
-        if (ttl != null && !ttl.isZero() && !ttl.isNegative()) {
-            expiresAt = System.currentTimeMillis() + ttl.toMillis();
-        }
-        store.put(key, new Entry(value, expiresAt));
-    }
-}
-```
-
-### 2.4 Interceptor/Decorator (AOP)
-
-**De ce există:** caching-ul trebuie aplicat “din afară”, fără să modificăm logica internă a serviciilor.
-
-În proiect:
-
-- `@ImpactCacheable` – marchează metodele care se cache-uiesc
-- `@ImpactCacheEvict` – marchează metodele care invalidează cache-ul
-- `ImpactCacheAspect` – “interceptorul” care:
-  1. generează cheia
-  2. caută în cache
-  3. dacă găsește → returnează din cache (**HIT**)
-  4. dacă nu găsește → execută metoda reală, apoi salvează în cache (**MISS**)
-
-#### 2.4.1 `@ImpactCacheable` (ce înseamnă)
-
-`@ImpactCacheable` are 2 câmpuri:
-
-- `prefix()` – “numele” logic al cache-ului (ex: `users:list`)
-- `ttlSeconds()` – cât timp ținem intrarea în cache
-
-Cod:
-
-```java
-@Target(ElementType.METHOD)
-@Retention(RetentionPolicy.RUNTIME)
-public @interface ImpactCacheable {
-    String prefix();
-    long ttlSeconds() default 300;
-}
-```
-
-#### 2.4.2 `@ImpactCacheEvict` (ce înseamnă)
-
-`@ImpactCacheEvict` e pentru metode care **modifică date**. După ce metoda rulează cu succes, noi “curățăm” cache-ul.
-
-- `allEntries = true` înseamnă “șterge TOT ce începe cu prefix-ul acesta” (ex: toate cheile `users:list:*`)
-- `allEntries = false` înseamnă “șterge doar cheia calculată din argumente”
-
-Cod:
-
-```java
-@Target(ElementType.METHOD)
-@Retention(RetentionPolicy.RUNTIME)
-public @interface ImpactCacheEvict {
-    String prefix();
-    boolean allEntries() default false;
-}
-```
-
-#### 2.4.3 `ImpactCacheAspect` – logica reală (HIT / MISS / PUT / EVICT)
-
-Acesta e “motorul” caching-ului. Are două interceptări:
-
-- una pentru `@ImpactCacheable`
-- una pentru `@ImpactCacheEvict`
-
-Cod (varianta din proiect, cu explicații în text):
-
-```java
-@Aspect
-@Component
-public class ImpactCacheAspect {
-    private final CacheClient cacheClient;
-    private final CacheMarshaller marshaller;
-    private final CacheKeyGenerator keyGenerator;
-
-    public ImpactCacheAspect(CacheClient cacheClient, CacheMarshaller marshaller) {
-        this.cacheClient = cacheClient;
-        this.marshaller = marshaller;
-        this.keyGenerator = CacheKeyGenerator.defaultGenerator();
-    }
-
-    @Around("@annotation(com.impact.lessons.cache.ImpactCacheable)")
-    public Object aroundCacheable(ProceedingJoinPoint pjp) throws Throwable {
-        Method method = ((MethodSignature) pjp.getSignature()).getMethod();
-        ImpactCacheable ann = method.getAnnotation(ImpactCacheable.class);
-
-        // Dacă metoda întoarce void, nu are sens să cache-uim.
-        Class<?> returnType = ((MethodSignature) pjp.getSignature()).getReturnType();
-        if (returnType == Void.TYPE) {
-            return pjp.proceed();
-        }
-
-        // 1) key
-        String key = keyGenerator.generate(ann.prefix(), pjp.getArgs());
-
-        // 2) get
-        Optional<byte[]> cached = cacheClient.get(key);
-        if (cached.isPresent()) {
-            CacheRequestContext.markHit();
-            Type genericReturnType = method.getGenericReturnType();
-            return marshaller.deserialize(cached.get(), genericReturnType);
-        }
-
-        // 3) MISS -> rulează metoda reală
-        CacheRequestContext.markMiss();
-        Object result = pjp.proceed();
-
-        // 4) PUT (doar dacă nu e null)
-        if (result != null) {
-            cacheClient.set(key, marshaller.serialize(result), Duration.ofSeconds(ann.ttlSeconds()));
-        }
-        return result;
-    }
-
-    @Around("@annotation(com.impact.lessons.cache.ImpactCacheEvict)")
-    public Object aroundEvict(ProceedingJoinPoint pjp) throws Throwable {
-        Method method = ((MethodSignature) pjp.getSignature()).getMethod();
-        ImpactCacheEvict ann = method.getAnnotation(ImpactCacheEvict.class);
-
-        // Întâi executăm metoda (scrierea în DB).
-        Object result = pjp.proceed();
-
-        // Abia după aceea curățăm cache-ul.
-        if (ann.allEntries()) {
-            cacheClient.deleteByPrefix(ann.prefix() + ":");
-        } else {
-            String key = keyGenerator.generate(ann.prefix(), pjp.getArgs());
-            cacheClient.delete(key);
-        }
-        return result;
-    }
-}
-```
-
-Observație importantă: la `@ImpactCacheEvict` noi facem `proceed()` întâi și **evict după**. Asta e intenționat: dacă metoda eșuează (excepție), nu vrei să golești cache-ul “degeaba”.
+Pentru `mvn test` **nu** cerem Redis: există `impact.cache.type=memory` și excludere auto-config Redis, ca contextul Spring să pornească fără Memurai.
 
 ---
 
-## 4) Observabilitate: cum apare `X-Impact-Cache: HIT|MISS` în răspuns
+## 4. Cum arată fluxul unei cereri (GET cache-uit)
 
-Avem o variabilă “per request” în `CacheRequestContext`, implementată cu `ThreadLocal`. Aspectul o setează:
+Exemplu: `UserController` apelează `UserService.getAllUsers()` (metodă marcată cu `@ImpactCacheable`).
 
-- la HIT → `CacheRequestContext.markHit()`
-- la MISS → `CacheRequestContext.markMiss()`
+1. **Înainte** de corpul metodei, `**ImpactCacheAspect`** calculează **cheia** (`CacheKeyGenerator`).
+2. Citește din `**CacheClient.get(key)`**:
+  - dacă există valoare validă (neexpirată) → deserializare → return; `**CacheRequestContext.markHit()**`;
+  - altfel → `**markMiss()**`, rulează metoda reală (DB), serializare, `**CacheClient.set(..., ttl)**`.
+3. La scrierea răspunsului JSON, `**CacheResponseHeadersAdvice**` citește `CacheRequestContext` și setează header-ele (vezi secțiunea 7).
+4. La final, `**CacheStatusHeaderFilter**` apelează `**CacheRequestContext.clear()**`.
 
-Iar la final de request, `CacheStatusHeaderFilter` citește statusul și pune header-ul pe response:
-
-```java
-@Component
-public class CacheStatusHeaderFilter extends OncePerRequestFilter {
-    public static final String HEADER_NAME = "X-Impact-Cache";
-
-    @Override
-    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
-            throws ServletException, IOException {
-        try {
-            filterChain.doFilter(request, response);
-        } finally {
-            CacheRequestContext.Status status = CacheRequestContext.getStatus();
-            if (status != null) {
-                response.setHeader(HEADER_NAME, status.name());
-            }
-            CacheRequestContext.clear();
-        }
-    }
-}
-```
+**Evict:** pentru metode cu `@ImpactCacheEvict`, aspectul face `**proceed()`** (scriere DB) **mai întâi**; doar dacă reușește, șterge din cache (`delete` sau `deleteByPrefix`). Astfel nu pierzi cache-ul dacă tranzacția eșuează.
 
 ---
 
-## 5) Unde am aplicat caching în proiect (exemplu clar)
+## 5. Chei (Key Generator)
 
-În `UserService`:
+Reguli practice (în `CacheKeyGenerator`):
 
-- `getAllUsers()` este cache-uit:
-  - `@ImpactCacheable(prefix = "users:list", ttlSeconds = 300)`
-- La modificări care pot schimba lista (consistență), cache-ul este invalidat:
-  - `createUser(...)` → `@ImpactCacheEvict(prefix = "users:list", allEntries = true)`
-  - `updatePersonalData(...)` → idem
-  - `assignRoleToUser(...)` → idem
+- Fără argumente → cheia este `**prefix:static`** (ex. `users:list:static`).
+- Cu argumente → `**prefix:val1:val2:...**` (argumentele sunt normalizate: spații, max 80 caractere).
+- Dacă cheia devine prea lungă (> 256 caractere) → variantă `**prefix:sha256:...**`.
 
-Idee: **listările se cache-uiesc, modificările dau “evict”**.
-
-Cod exemplu din proiect:
-
-```java
-@Transactional
-@ImpactCacheEvict(prefix = "users:list", allEntries = true)
-public void createUser(CreateUserRequest request) {
-    // ... scriere în DB ...
-}
-
-@ImpactCacheable(prefix = "users:list", ttlSeconds = 300)
-public List<UserDto> getAllUsers() {
-    return userRepository.findAll().stream()
-            .map(user -> new UserDto(user.getId(), user.getUsername()))
-            .collect(Collectors.toList());
-}
-```
+**Important:** două apeluri cu aceiași parametri trebuie să producă **aceeași** cheie.
 
 ---
 
-## 6) Cum testăm ușor în Postman (fără “bătăi de cap”)
+## 6. TTL (timp de viață)
 
-### 4.1 Test HIT/MISS
+TTL-ul este setat **per metodă** în `@ImpactCacheable(ttlSeconds = ...)`.
 
-Pe endpoint-ul cache-uit (ex. `GET /api/users`):
-
-1. primul request:
-  - răspuns header: `X-Impact-Cache: MISS`
-  - tipic e mai lent (DB + mapping + cache write)
-2. al doilea request imediat:
-  - răspuns header: `X-Impact-Cache: HIT`
-  - tipic e mai rapid (fără DB)
-
-### 4.2 Test TTL (expirare)
-
-1. faci request (cache se umple)
-2. aștepți ~5 minute (TTL=300 sec)
-3. faci request din nou:
-  - ar trebui să fie `MISS` (cache expirat)
-
-### 4.3 Test invalidare (evict)
-
-1. `GET /api/users` (creează cache)
-2. `POST /api/users/register` (invalidează cache)
-3. `GET /api/users`:
-  - `MISS` (se reconstruiește cache)
+- **Memory:** la `set` se salvează momentul expirării; la `get`, dacă a expirat, intrarea se șterge și se tratează ca „lipsă” (comportament MISS la următorul nivel).
+- **Redis:** după `SET`, clientul aplică `**EXPIRE`** pe aceeași cheie (secunde).
 
 ---
 
-## 7) Fișiere cheie introduse/modificate
+## 7. Header-e în Postman (răspuns, nu request)
 
-### Cache (nou)
+După trimiterea request-ului, în Postman deschide tab-ul **Headers** la **Response** (nu la request).
 
-- `cache/ImpactCacheable.java`
-- `cache/ImpactCacheEvict.java`
-- `cache/ImpactCacheAspect.java`
-- `cache/CacheKeyGenerator.java`
-- `cache/CacheMarshaller.java`
-- `cache/JacksonCacheMarshaller.java`
-- `cache/CacheClient.java`
-- `cache/InMemoryCacheClient.java` (default)
 
-### Observabilitate (Postman)
+| Header                       | Exemple                                    | Semnificație                                                                            |
+| ---------------------------- | ------------------------------------------ | --------------------------------------------------------------------------------------- |
+| `**X-Impact-Cache`**         | `HIT` / `MISS`                             | `HIT` = răspunsul a venit din cache; `MISS` = s-a recalculat și s-a (re)scris cache-ul. |
+| `**X-Impact-Cache-Backend**` | `InMemoryCacheClient` / `RedisCacheClient` | Ce implementare `CacheClient` rulează acum.                                             |
 
-- `cache/CacheRequestContext.java`
-- `cache/CacheStatusHeaderFilter.java` → setează header-ul `X-Impact-Cache`
 
-### Config / build
-
-- `pom.xml` (AOP)
-- `application.yaml` (`impact.cache.type`)
+**De ce nu punem header-ele doar într-un `Filter`?**  
+Pentru `@RestController`, corpul JSON este scris adesea **înainte** ca `Filter`-ul să poată seta header-e în `finally`; răspunsul poate fi deja „committed”. De aceea header-ele se pun în `**ResponseBodyAdvice.beforeBodyWrite`**. Filtrul rămâne util pentru **curățarea** `ThreadLocal`.
 
 ---
 
-## 8) Concluzie (de reținut pentru elevi)
+## 8. Loguri (consolă / IDE)
 
-Caching-ul “corect” are 5 piese:
+- **INFO la pornire:** mesaje din `InMemoryCacheClient` / `RedisCacheClient` și din `ImpactCacheAspect` (ce client e legat).
+- **DEBUG în timpul rulării:** în `ImpactCacheAspect` — HIT/MISS/PUT/EVICT cu `backend=...`.
 
-- **marshalling** (object <-> bytes)
-- **interceptor/decorator** (fără `if` în servicii)
-- **TTL** (date proaspete)
-- **key generator** (chei stabile, fără coliziuni)
+Nivelul poate fi reglat în `application.yaml` sub `logging.level.com.impact.lessons.cache`.
 
-În proiect, elevii pot învăța principiul pe **in-memory cache**.
+---
+
+## 9. Unde e folosit în aplicație (exemplu real)
+
+În `**UserService`**:
+
+- `**getAllUsers()**` — `@ImpactCacheable(prefix = "users:list", ttlSeconds = 300)`.
+- `**createUser**`, `**updatePersonalData**`, `**assignRoleToUser**` — `@ImpactCacheEvict(prefix = "users:list", allEntries = true)` ca lista din cache să nu rămână în urmă față de DB.
+
+În `**UserController**`, listarea este expusă ca `**GET /api/users**`, dar este protejată: ai nevoie de **JWT cu rol `ADMIN`** (`@PreAuthorize`).
+
+---
+
+## 10. Cum testezi în Postman (pași scurți)
+
+1. **Login admin** (cont bootstrap din Liquibase — vezi `Postman Comands.md`): `POST http://localhost:8081/api/authenticate`.
+2. `**GET http://localhost:8081/api/users`** cu header `Authorization: Bearer <token>`.
+3. Repetă imediat același GET:
+  - primul răspuns: de obicei `**X-Impact-Cache: MISS**`;
+  - al doilea: de obicei `**X-Impact-Cache: HIT**`.
+4. **Evict:** `POST /api/users/register` (sau alt flux care lovește o metodă cu `@ImpactCacheEvict`), apoi din nou `GET /api/users` → așteptat `**MISS`**.
+5. **TTL:** așteaptă `ttlSeconds` (ex. 300 secunde), apoi `GET` → așteptat `**MISS`**.
+
+---
+
+## 11. Redis / Memurai (Windows)
+
+Memurai este compatibil protocol Redis, de obicei pe `**127.0.0.1:6379**`.
+
+1. Pornește serviciul Memurai.
+2. Setează în `application.yaml`: `**impact.cache.type: redis**` și verifică `spring.data.redis.*`.
+3. Repornește aplicația. În Postman, `**X-Impact-Cache-Backend**` trebuie să fie `**RedisCacheClient**`.
+
+Pentru depanare în dev poți folosi `redis-cli` (`PING`, `KEYS users:list*`, `MONITOR` — cu grijă, `MONITOR` e zgomotos).
+
+---
+
+## 12. Legătura cu „Spring Cache” (examene) — ce face fiecare adnotare
+
+În **Spring Framework**, modulul **Spring Cache** oferă adnotări care lucrează cu un **`CacheManager`** (cache în memorie, Redis etc., după configurare). **În proiectul nostru** nu folosim aceste adnotări, dar la examen trebuie să știi **ce face fiecare** și **cum se mapează** la `@ImpactCacheable` / `@ImpactCacheEvict`.
+
+---
+
+### 12.1. `@Cacheable` (Spring)
+
+**Ce face:** marchează o metodă a cărei **valoare returnată** poate fi citită din cache.
+
+**Pași tipici:**
+
+1. Spring calculează o **cheie** (nume cache + parametri sau `keyGenerator`).
+2. Dacă pentru cheie **există** valoare în cache → returnează din cache și **sari peste** execuția metodei (în varianta clasică).
+3. Dacă **nu există** → execută metoda, pune rezultatul în cache (TTL dacă e configurat la nivel de cache), returnează rezultatul.
+
+**Parametri des întâlniți:** `cacheNames` / `value`, `key`, `keyGenerator`, opțional `condition` / `unless`.
+
+**La noi:** `@ImpactCacheable` + `ImpactCacheAspect` — același tip de idee: **get din cache → la miss `proceed()` + set** cu `ttlSeconds`.
+
+---
+
+### 12.2. `@CacheEvict` (Spring)
+
+**Ce face:** marchează o metodă la care vrei să **ștergi** intrări din cache (invalidare), ca să nu mai servești date **depășite** după ce ai modificat baza de date.
+
+**Când se folosește:** după insert/update/delete sau orice operație care face ca răspunsurile cache-uite anterior să fie **false**.
+
+**Opțiuni uzuale:**
+
+- **`allEntries = true`** — golește **tot** cache-ul indicat (toate cheile din acel „nume”).
+- **`key`** — ștergi **o** intrare anume.
+- **`beforeInvocation`** — evict **înainte** de metodă (implicit e după; la noi mereu **după** `proceed()` reușit).
+
+**La noi:** `@ImpactCacheEvict` + aspect: **întâi** rulează metoda (DB), **apoi** `delete` sau `deleteByPrefix` după `prefix` și `allEntries`.
+
+---
+
+### 12.3. `@CachePut` (Spring)
+
+**Ce face:** **execută mereu** metoda (nu sare peste ea din cauza cache-ului) și, cu rezultatul obținut, **scrie/actualizează** mereu cache-ul.
+
+**Diferență clară față de `@Cacheable`:**
+
+| | `@Cacheable` | `@CachePut` |
+|---|--------------|-------------|
+| Rulează metoda dacă există în cache? | De obicei **nu** | **Da**, mereu |
+| Scrie în cache după execuție? | Da (la miss) | **Da**, mereu |
+
+**Exemplu de intenție:** „Vreau mereu ultima valoare calculată în cache, chiar dacă exista deja ceva acolo.”
+
+**La noi:** nu avem `@ImpactCachePut`. Un **refresh** apropiat: apel care dă **MISS** (cheie absentă sau expirată) → metoda rulează → rezultatul se scrie în cache. Dar dacă e **HIT**, metoda **nu** rulează — deci **nu** e identic cu `@CachePut`.
+
+---
+
+### 12.4. `@Caching` (Spring)
+
+**Ce face:** permite pe **aceeași metodă** să grupezi **mai multe** acțiuni: mai multe `@Cacheable`, `@CacheEvict`, `@CachePut` într-un singur loc (un array de operații).
+
+**Exemplu de idee:** „La această metodă: șterge din cache `users` și `stats`, dar salvează rezultatul în `lastResult`.”
+
+**La noi:** nu există o singură adnotare echivalentă. Gruparea se face practic prin **mai multe metode** (citire cu `@ImpactCacheable`, scrieri cu `@ImpactCacheEvict`) sau prin extinderea aspectului — în lecție nu e implementat `@Caching`.
+
+---
+
+### 12.5. Tabel rezumat (Spring → Impact)
+
+| Spring | Pe scurt | La noi |
+|--------|----------|--------|
+| `@Cacheable` | Citește cache; la miss execută metoda și pune rezultatul. | `@ImpactCacheable` + `ImpactCacheAspect` |
+| `@CacheEvict` | Șterge din cache (invalidare). | `@ImpactCacheEvict` + `ImpactCacheAspect` |
+| `@CachePut` | Execută mereu metoda și rescrie cache-ul. | Fără adnotare dedicată; similar parțial doar la flux MISS + scriere |
+| `@Caching` | Mai multe operații de cache pe o metodă. | Fără echivalent; mai multe metode / adnotări |
+
+---
+
+### 12.6. Invalidare la modificare (în proiect)
+
+Metodele care **scriu** în DB și afectează lista afișată (`createUser`, `updatePersonalData`, `assignRoleToUser`) au `@ImpactCacheEvict(prefix = "users:list", allEntries = true)` — se șterg toate cheile care încep cu `users:list:`, ca următorul `getAllUsers` să nu folosească o listă veche.
+
+---
+
+### 12.7. TTL diferit per „cache” (în proiect)
+
+În Spring Cache, TTL-ul e adesea la **nivel de configurație** a cache-ului. **La noi** e **per metodă**: `@ImpactCacheable(..., ttlSeconds = 300)` vs altă metodă cu `ttlSeconds = 60` — fără schimbări suplimentare de cod.
+
+---
+
+## 13. Lista fișierelor relevante (pachet `com.impact.lessons.cache`)
+
+- `ImpactCacheable.java`, `ImpactCacheEvict.java`
+- `ImpactCacheAspect.java`
+- `CacheClient.java`
+- `InMemoryCacheClient.java`
+- `RedisConnectionProvider.java`, `SpringRedisConnectionProvider.java`, `RedisCacheClient.java`
+- `CacheMarshaller.java`, `JacksonCacheMarshaller.java`
+- `CacheKeyGenerator.java`
+- `CacheRequestContext.java`
+- `CacheResponseHeadersAdvice.java`
+- `CacheStatusHeaderFilter.java`
+
+**Config:** `application.yaml`, `pom.xml`  
+**Exemplu de utilizare:** `UserService.java`  
+**Teste:** `src/test/resources/application.properties`
+
+---
+
+## 14. Concluzie
+
+Am introdus un **caching declarativ** (adnotări proprii + AOP), cu **TTL**, **chei deterministe**, **marshalling JSON**, **două backend-uri** (memorie / Redis), **observabilitate** în Postman (header-e) și **loguri** pentru depanare. Comutarea între moduri se face prin `**impact.cache.type`**, fără să rescrii logica din servicii.
+
+---
+
+## 15. Explicație
+
+### De ce avem nevoie de cache?
+
+Dacă la **fiecare** cerere pentru **lista utilizatorilor** mergem în **bază de date**, construim lista și trimitem răspunsul, sub sarcină mare totul devine **lent** și baza e **solicitată** inutil.
+
+**Cache-ul** e ca o **raftă rapidă**: o dată „costisitor” calculăm răspunsul, îl **punem pe raft**. La următoarea cerere **identică**, îl **luăm de pe raft** și **nu mai interogăm** baza. Asta înseamnă răspuns mai rapid și mai puțină presiune pe DB.
+
+### Cum am făcut fără să încurcăm serviciul cu `if (cache...)`
+
+Nu am scris în `UserService` o grămadă de condiții.
+
+Am pus **etichete** pe metode:
+
+- `**@ImpactCacheable`** — „rezultatul **acestei** metode se poate salva în cache” (ex.: lista utilizatorilor).
+- `**@ImpactCacheEvict`** — „**după** această metodă trebuie să **golesc** cache-ul”, pentru că în baza de date **s-a schimbat** ceva (înregistrare user, roluri etc.).
+
+Un alt fișier, `**ImpactCacheAspect`**, e ca un **paznic la ușa** metodei (AOP):
+
+1. Calculează o **cheie** din prefix + argumente (la listă fără parametri e ceva de forma `users:list:static`).
+2. Caută în depozit:
+  - **găsește** → returnează din cache; în header apare `**HIT`** („am luat de pe raft”).
+  - **nu găsește** → rulează metoda reală (DB), pune rezultatul în cache cu **TTL**; apare `**MISS`** („nu era pe raft, tocmai l-am pus”).
+
+Logica de business rămâne în serviciu; cache-ul e **în jurul** ei.
+
+### Două „rafturi” (unde ținem datele)
+
+În `application.yaml`, `**impact.cache.type`**:
+
+- `**memory**` — raftul e **în memoria aplicației** (JVM). Simplu la laborator, **nu** ai nevoie de Redis. Minus: la **restart** aplicației raftul se golește; dacă ai **mai multe instanțe**, fiecare are propriul raft.
+- `**redis`** (Memurai e compatibil Redis) — raftul e **un server separat**. Util când vrei **același** cache pentru mai multe copii ale aplicației. Trebuie ca **Memurai/Redis să ruleze** (de obicei `localhost:6379`).
+
+În Postman, la **răspuns**, uită-te la `**X-Impact-Cache-Backend`**: îți spune ce „raft” a rulat — `InMemoryCacheClient` sau `RedisCacheClient`.
+
+### Ce înseamnă header-ele (tab **Headers** la **Response**, nu la request)
+
+- `**X-Impact-Cache: MISS`** — răspunsul **nu** a venit din cache (de obicei primul request după start sau după ce s-a invalidat cache-ul).
+- `**X-Impact-Cache: HIT`** — răspunsul **a venit** din cache (de obicei al doilea request identic imediat).
+
+**TTL** (`ttlSeconds` pe `@ImpactCacheable`) — după câte **secunde** intrarea de pe raft „expiră” singură, ca să nu dăm la infinit o listă veche.
+
+**Evict** — când cineva **scrie** în DB (ex. `register`), ștergem cache-ul listei, ca următorul `GET` să fie din nou `**MISS`** și să citească date **proaspete**.
+
+### De ce nu punem header-ele doar într-un filtru la final?
+
+Pentru `@RestController`, JSON-ul poate fi deja **trimis** către client, iar atunci e **prea târziu** să mai adaugi header-e în `finally` la filtru. De aceea header-ele se pun în `**ResponseBodyAdvice`** (înainte de scrierea body-ului). Filtrul de la final doar **curăță** variabilele pe thread, ca să nu se amestece între cereri.
+
+### O singură propoziție de reținut
+
+**Cache = memorăm temporar un răspuns scump; HIT = l-am luat de pe raft; MISS = l-am recalculat și l-am pus pe raft; evict = am uitat raftul pentru că datele din DB s-au schimbat; comutatorul raftului = `impact.cache.type`.**

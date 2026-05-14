@@ -248,3 +248,15 @@ Ex: `GET /api/users`
 }
 ```
 
+---
+
+## 10) Cache (GET `/api/users`) — header-e în Postman
+
+După request, deschide tab-ul **Headers** la răspuns (nu Body). Vei vedea:
+
+| Header | Exemplu | Semnificație |
+|--------|---------|--------------|
+| `X-Impact-Cache` | `HIT` / `MISS` | rezultatul din cache sau recalculat |
+| `X-Impact-Cache-Backend` | `InMemoryCacheClient` sau `RedisCacheClient` | ce implementare rulează (`impact.cache.type` memory vs redis) |
+
+**Notă:** `GET /api/users` necesită token **ADMIN** (`Authorization: Bearer ...`).

@@ -1,5 +1,8 @@
 package com.impact.lessons.cache;
 
+import jakarta.annotation.PostConstruct;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
@@ -11,6 +14,8 @@ import java.util.concurrent.ConcurrentHashMap;
 @Component
 @ConditionalOnProperty(name = "impact.cache.type", havingValue = "memory", matchIfMissing = true)
 public class InMemoryCacheClient implements CacheClient {
+    private static final Logger log = LoggerFactory.getLogger(InMemoryCacheClient.class);
+
     private static final class Entry {
         final byte[] value;
         final long expiresAtMillis;
@@ -23,6 +28,11 @@ public class InMemoryCacheClient implements CacheClient {
 
     // ConcurrentHashMap: acces sigur din mai multe thread-uri (request-uri) simultan.
     private final Map<String, Entry> store = new ConcurrentHashMap<>();
+
+    @PostConstruct
+    void logBackend() {
+        log.info("Impact cache backend active: in-memory (InMemoryCacheClient), impact.cache.type=memory");
+    }
 
     @Override
     public Optional<byte[]> get(String key) {
