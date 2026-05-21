@@ -41,6 +41,12 @@ public class SecurityConfig {
         http
                 .csrf(csrf -> csrf.disable()) // Dezactivează protecția CSRF, deoarece folosim token-uri JWT.
                 .authorizeHttpRequests(authorize -> authorize
+                        .requestMatchers(
+                                "/swagger-ui.html",
+                                "/swagger-ui/**",
+                                "/v3/api-docs",
+                                "/v3/api-docs/**"
+                        ).permitAll()
                         .requestMatchers("/api/authenticate", "/api/users/register").permitAll() // Permite accesul neautentificat la endpoint-urile de autentificare și înregistrare.
                         .requestMatchers("/admin/**").hasRole("ADMIN")
                         .anyRequest().authenticated() // Toate celelalte cereri necesită autentificare.

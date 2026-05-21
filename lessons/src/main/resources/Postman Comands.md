@@ -1,5 +1,9 @@
 # Ghid Postman (RBAC + JWT + Exception Handling)
 
+**Swagger UI (alternativă):** http://localhost:8081/swagger-ui.html — documentație completă în `Documentatie Implementare Swagger.md`.
+
+---
+
 Acest document descrie pașii practici pentru testarea implementării curente:
 
 - autentificare JWT,
